@@ -1,11 +1,11 @@
-# 71 of the 74 times I was sure the site was blocking me, it was my own bug
+# 110 of the 115 times I was sure the site was blocking me, it was my own bug
 
 I have a table in my project notes with two columns. The left one says what I
 was confident about. The right one says what it turned out to be. A row gets
 added every time those two disagree.
 
-It is at 74 rows. In 71 of them the cause was my own bug or my own misreading.
-Three were the platform genuinely behaving differently than I expected.
+It is at 115 rows. In 110 of them the cause was my own bug or my own misreading.
+Five were the platform genuinely behaving differently than I expected.
 
 The project is a monitoring and automation tool for a large ticketing site,
 which means most of my working days are spent looking at responses that are
@@ -88,6 +88,77 @@ block responses, and the shorter one produced a different message. So 108 blocke
 reads over 33 hours arrived as ordinary failures, three separate recovery
 mechanisms all missed them, and the connection stayed blind. Every one of those
 mechanisms was keyed on a sentence.
+
+## Who else is failing on that connection
+
+The block page above has a third meaning I only found in September. Two events
+went behind a waiting room one afternoon and refused every read for the next
+nine hours: 2,696 refusals, each one the same block page an address gets when
+the edge has had enough of it. So each one was treated as the address being
+rejected, the connection was thrown away, and a fresh token was bought for the
+next one. Roughly three quarters of that day's bill was those two events.
+
+Nine other events on the same connection read normally the whole time. That is
+the fact that separates the two cases, and nothing was looking at it. A
+rejected address refuses everything that goes through it. A gated event refuses
+itself and leaves its neighbours alone. So the question is not how many
+refusals a connection has seen, it is what share of its events are being
+refused, and two of twelve is an event while twelve of twelve is an address.
+
+The fix went in, and the run meant to confirm it found the hole within half an
+hour. It proved an address healthy by a neighbour's successful read, and at
+startup no neighbour had read yet, so three refusals inside two seconds tripped
+the address breaker and took twelve events off the air for five minutes.
+Reading the fix would not have found that. Running it did, thirty minutes after
+I had committed it.
+
+## The cache was two objects
+
+Reads of the same resource thirty seconds apart came back with two different
+bodies, alternating. The `age` header gave it away: 53, 54, 113, 114, 173, 174.
+Two objects, born 29 seconds apart, each climbing exactly sixty a minute, each
+served unrefreshed for three minutes against a declared maximum age of sixty.
+
+So my view of an event flipped between two moments up to half a minute apart,
+and a block present in one generation and absent in the other looked like
+inventory appearing and disappearing on every read. Then the harder
+measurement: 152 pushes from the site saying inventory had moved, a read right
+after each one, and every single read returned an object built before the
+push. Median lag 70 seconds, worst 176.
+
+A cache-busting query parameter did nothing. Same generation, same weak etag,
+same 29,940 bytes, `age` climbing straight through it. A unique URL does not
+reach the origin when a shield sits in front of it.
+
+None of this was a bug I could fix. What it changed is what I compare my own
+latency against. My chain from seeing a change to acting on it takes under two
+seconds. The copy I see the change in is typically a minute and a half old.
+Optimising the two seconds was the wrong end.
+
+## A verdict the tool could not reach
+
+The tool that measured that cache had two verdicts, `FRESH` and `STALE`.
+`FRESH` was decided from the `last-modified` header. That header came back
+empty on every read, and the tool's own notes said so, two paragraphs below the
+code that needed it.
+
+So a tool whose entire output was a verdict had one verdict it could never
+print, and nothing said so. It reconstructs the object's age from whichever
+header is present now, and says which one it used. When a tool exists to say
+one of two things, make it prove it can say both.
+
+## Closing a socket with unread data is a reset
+
+Not from the ticketing project. A test I wrote started a small server, recorded
+what a client sent, wrote a response, and closed. Two runs in six the client
+reported the connection forcibly closed and never saw the response.
+
+The client had kept talking after its request, a settings acknowledgement in
+this case, and the server closed with those bytes unread. A close with unread
+data in the receive buffer is a reset, not a shutdown, and a reset can take the
+response the client was about to read with it. The server drains until the test
+is done with the client now. Any test server that answers and hangs up needs
+the same.
 
 ## A test that passes proves nothing until you have seen it fail
 
