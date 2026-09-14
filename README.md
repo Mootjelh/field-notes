@@ -1,10 +1,10 @@
-# 110 of the 115 times I was sure the site was blocking me, it was my own bug
+# 117 of the 122 times I was sure the site was blocking me, it was my own bug
 
 I have a table in my project notes with two columns. The left one says what I
 was confident about. The right one says what it turned out to be. A row gets
 added every time those two disagree.
 
-It is at 115 rows. In 110 of them the cause was my own bug or my own misreading.
+It is at 122 rows. In 117 of them the cause was my own bug or my own misreading.
 Five were the platform genuinely behaving differently than I expected.
 
 The project is a monitoring and automation tool for a large ticketing site,
@@ -160,6 +160,35 @@ response the client was about to read with it. The server drains until the test
 is done with the client now. Any test server that answers and hangs up needs
 the same.
 
+## A defect you can read is not always a defect you can reach
+
+Not from the ticketing project. I was reading someone else's HTTP client,
+chasing a crash report that had been open for a year.
+
+The cause was easy to see. One function is reached from two places, and only
+one of them runs the setup that fills in three fields. Come in through the other
+door and all three are still nil, and the code that uses them runs in its own
+goroutine, so the nil dereference takes the whole process down with no chance to
+recover. Two lines reproduce it.
+
+I was sure enough to start writing it up as a crash on a common path. Then I
+wrote the end to end test first, out of habit. A server advertising the feature,
+an ordinary client, a wait afterwards to let the goroutine run.
+
+It survived. I made the wait longer. Still alive.
+
+Every ordinary request goes through a third method that does run the setup, so
+by the time the second door is used the fields are already filled in. The defect
+is real and the process really does die, but only when nothing has run the setup
+yet, which is why the reporter saw it intermittently under load rather than on
+every run.
+
+Both halves matter and they are different claims. "This code is wrong" I had
+from reading. "You can get here with it wrong" only came from running it, and it
+was the half that explained the symptom the reporter actually described. Had I
+sent the first version, I would have told a stranger their library crashes on a
+path where it does not.
+
 ## A test that passes proves nothing until you have seen it fail
 
 I wrote a test to pin down a safety property. It passed. I moved on.
@@ -175,6 +204,38 @@ has caught three tests that were checking nothing.
 
 The same applies to a fix. Reverting the fix and watching the test fail is the
 only evidence that the test and the fix are about the same thing.
+
+## Compare against the reference, not against a table you wrote
+
+The same HTTP client as two sections up, a different bug, and this one is
+about the fix I wrote rather than the bug.
+
+I had to decide whether two bytes at the front of a compressed body are a
+particular format's header. I wrote the check, three conditions, and a test that
+generated real headers with the standard library's encoder and asserted my check
+recognised them all. Then, because of the section above, I mutated: reverted
+the fix, watched the test go red. Good.
+
+It was not good. I had only mutated in one direction. I deleted one of the three
+conditions, making the check accept more than it should, and the suite stayed
+green. My only negative case failed a different condition anyway, so nothing in
+the test was holding that one.
+
+The obvious repair is more examples. That is where the previous bug of this kind
+came from: two headers I worked out by hand for a table turned out not to be
+valid at all.
+
+So instead of examples, the reference. The standard library already decides this
+exact question. There are 65536 possible two byte headers, which is nothing, so
+the test walks all of them, asks the standard library whether it accepts each
+one, and asserts my check agrees. They agree exactly: 66 accepted by both, no
+disagreement in either direction. Deleting any of the three conditions now fails.
+
+The general version: when you are reimplementing a decision something else
+already makes correctly, do not write down examples of the decision. If the
+input space is small enough to enumerate, enumerate it and compare. My table had
+a handful of entries and was blind to a whole direction. A loop over every input
+cannot be.
 
 ## A number is not a rate until you have grouped it correctly
 
