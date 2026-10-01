@@ -1,284 +1,240 @@
-# 117 of the 122 times I was sure the site was blocking me, it was my own bug
+# Field notes: reading a bot-protected site from the outside
 
-I have a table in my project notes with two columns. The left one says what I
-was confident about. The right one says what it turned out to be. A row gets
-added every time those two disagree.
+Notes from building a monitoring and automation tool against a large ticketing
+site that sits behind a CDN edge, a WAF and a waiting room. Every section is
+something that cost real time, what was actually going on, and the check that
+tells the cases apart. All the numbers are measured.
 
-It is at 122 rows. In 117 of them the cause was my own bug or my own misreading.
-Five were the platform genuinely behaving differently than I expected.
+## The rules, short
 
-The project is a monitoring and automation tool for a large ticketing site,
-which means most of my working days are spent looking at responses that are
-technically fine and mean nothing I expected. That part is normal. The part
-worth writing down is that nearly every time I decided the other side was
-blocking me, throttling me, or behaving strangely, the other side was doing
-nothing of the kind.
+1. A structured error means you reached the origin. A block page means you did
+   not. Separate them where the response is read, never by matching an error
+   message.
+2. When a connection starts failing, ask what share of its work is failing.
+   One target out of twelve is that target. Twelve out of twelve is the
+   address.
+3. A cache can serve more than one stale copy of the same URL at once. Read the
+   `age` header before trusting a diff between two reads.
+4. An empty result is not an answer until the same request has returned data
+   for something you know exists.
+5. Before accepting a failure count as a background rate, group it by every
+   dimension you have.
+6. When your code reimplements a decision a reference already makes, compare
+   against the reference over the whole input space.
+7. A defect you can read is not always one you can reach. Run the end to end
+   path before telling anyone their code crashes.
+8. A tool with two verdicts has to prove it can print both.
+9. A test server that closes with unread data sends a reset, which can take the
+   response with it.
 
-## Why the table exists
+## Contents
 
-The problem is not being wrong. Everyone is wrong constantly and it costs
-nothing, because the next test corrects you.
+- [A block page and an error are opposite problems](#a-block-page-and-an-error-are-opposite-problems)
+- [Which share of the connection is failing](#which-share-of-the-connection-is-failing)
+- [The cache was two objects](#the-cache-was-two-objects)
+- [An empty result is not an answer](#an-empty-result-is-not-an-answer)
+- [A count is not a rate until it is grouped](#a-count-is-not-a-rate-until-it-is-grouped)
+- [Compare against the reference](#compare-against-the-reference)
+- [A defect you can read and a defect you can reach](#a-defect-you-can-read-and-a-defect-you-can-reach)
+- [A verdict the tool could not reach](#a-verdict-the-tool-could-not-reach)
+- [Closing a socket with unread data is a reset](#closing-a-socket-with-unread-data-is-a-reset)
+- [How these notes are kept](#how-these-notes-are-kept)
 
-The problem is being wrong and writing it down.
+## A block page and an error are opposite problems
 
-A typical sequence went like this. I concluded something on a Tuesday, wrote it
-into the project notes as a fact, and then reasoned from that fact for two
-weeks. Every decision after it inherited the error. When it finally broke, the
-bug was not in the code I wrote that week. It was in a sentence I had written a
-fortnight earlier and never checked again.
-
-So the table is not a list of mistakes for its own sake. It is a list of
-sentences I trusted, kept so that the next person to open the notes, which is
-almost always me, reads the correction in the same glance as the claim.
-
-The total in it has been wrong twice, incidentally. Both times because I
-incremented the number instead of counting the rows. A table about not trusting
-unchecked numbers, with an unchecked number in it.
-
-## An empty result is not an answer
-
-This is the most expensive pattern in the list. It produced four separate rows.
-
-I would call an endpoint, get a well formed response with an empty list in it,
-and conclude there was nothing to find. Three completely different situations
-produce exactly that response:
-
-- the thing really is empty
-- I asked the wrong path, and the server answered politely about nothing
-- the data arrived and my parser dropped it
-
-From the outside they are identical. All three are a 200 with `[]` in it.
-
-The worst instance took an hour to find. An event was actively selling tickets,
-my monitor read it every thirty seconds and reported zero available, and it was
-correct that the response contained nothing. The endpoint I was calling does not
-serve that region at all. It answers 200 with an empty list, forever, for events
-it has never heard of. A different endpoint had the data the whole time.
-
-Another was entirely mine. General admission tickets have no seat map, so they
-arrive with an empty `places` array and the section name attached to the offer
-instead. My parser skipped any entry with no places. Thirty seven percent of one
-venue was invisible, and the log line for that venue was identical to the log
-line for a sold out one.
-
-The rule I use now: when a read comes back empty, do not conclude anything until
-you have proved the shape of the request against data you know exists. An empty
-result tells you about your request at least as often as it tells you about the
-world.
-
-## Two failures that look the same and need opposite fixes
-
-A structured error means you reached the server and your payload is wrong. A
-block page means you never got there.
+Two failures come back looking alike. Both are a failed request and both are
+JSON:
 
 ```
-{"code":"Error.BadRequest","detail":{...}}    you arrived, fix the payload
-{"response":"block"}                          you did not, fix the address
+{"code":"Error.BadRequest","detail":{...}}    reached the origin: fix the payload
+{"response":"block"}                          stopped at the edge: fix the address
 ```
 
-These need completely different work. One is a field in your request body. The
-other is your IP, your TLS fingerprint, or your rate. I confused them more than
-once, because both come back as a failure and both are JSON.
+The first is a field in your request body. The second is your IP, your TLS
+fingerprint or your request rate. Work on the wrong one and nothing changes.
 
-They are separated at the point the response is read now, with a sentinel error,
-rather than by matching a phrase further up the stack. That last part matters.
-For a while the monitor decided whether a read had been blocked by looking for
-the words "blocked by the edge" in an error message. The edge has two different
-block responses, and the shorter one produced a different message. So 108 blocked
-reads over 33 hours arrived as ordinary failures, three separate recovery
-mechanisms all missed them, and the connection stayed blind. Every one of those
-mechanisms was keyed on a sentence.
+The less obvious part is where the distinction is made. For a while the tool
+decided whether a read had been blocked by looking for the words "blocked by
+the edge" in an error message. The edge has two block bodies, a long one and a
+short one, and the short one produced a different message. Over 33 hours, 108
+blocked reads arrived as ordinary failures. Three separate recovery mechanisms
+missed every one of them, because all three were keyed on that sentence, and
+the connection stayed blind.
 
-## Who else is failing on that connection
+The fix is a sentinel error returned at the point the body is parsed, covering
+both signatures, so everything further up asks `errors.Is` and nothing reads
+prose. A test pins the other half too: a structured body from the origin must
+not count as a block.
 
-The block page above has a third meaning I only found in September. Two events
-went behind a waiting room one afternoon and refused every read for the next
-nine hours: 2,696 refusals, each one the same block page an address gets when
-the edge has had enough of it. So each one was treated as the address being
-rejected, the connection was thrown away, and a fresh token was bought for the
-next one. Roughly three quarters of that day's bill was those two events.
+## Which share of the connection is failing
 
-Nine other events on the same connection read normally the whole time. That is
-the fact that separates the two cases, and nothing was looking at it. A
-rejected address refuses everything that goes through it. A gated event refuses
-itself and leaves its neighbours alone. So the question is not how many
-refusals a connection has seen, it is what share of its events are being
-refused, and two of twelve is an event while twelve of twelve is an address.
+A block page has a third meaning. Two events went behind a waiting room one
+afternoon and refused every read for the next nine hours, 2,696 refusals, each
+one the same body an address gets when the edge has had enough of it. So each
+one was handled as a refused address: the connection was dropped and a fresh
+session token was bought for the next read. Roughly three quarters of that
+day's spend went on those two events.
 
-The fix went in, and the run meant to confirm it found the hole within half an
-hour. It proved an address healthy by a neighbour's successful read, and at
-startup no neighbour had read yet, so three refusals inside two seconds tripped
-the address breaker and took twelve events off the air for five minutes.
-Reading the fix would not have found that. Running it did, thirty minutes after
-I had committed it.
+Nine other events on the same connection read normally the whole time, and
+that is what separates the two cases. A refused address refuses everything sent
+through it. A gated event refuses itself and leaves its neighbours alone. The
+useful number is the share of a connection's events being refused: two of
+twelve is an event, twelve of twelve is the address.
+
+The first version of that fix had a hole that only running it found, half an
+hour after it was committed. It proved an address healthy by a neighbour's
+successful read, and at startup no neighbour had read yet. Three refusals in
+two seconds tripped the address breaker and took twelve events offline for
+five minutes. The share rule has no such gap, since it needs no earlier
+success to compare against.
 
 ## The cache was two objects
 
-Reads of the same resource thirty seconds apart came back with two different
-bodies, alternating. The `age` header gave it away: 53, 54, 113, 114, 173, 174.
-Two objects, born 29 seconds apart, each climbing exactly sixty a minute, each
-served unrefreshed for three minutes against a declared maximum age of sixty.
+Reads of the same URL thirty seconds apart returned two different bodies,
+alternating. The `age` header explained it:
 
-So my view of an event flipped between two moments up to half a minute apart,
-and a block present in one generation and absent in the other looked like
-inventory appearing and disappearing on every read. Then the harder
-measurement: 152 pushes from the site saying inventory had moved, a read right
-after each one, and every single read returned an object built before the
-push. Median lag 70 seconds, worst 176.
+```
+read   1    2    3    4    5    6
+age   53   54  113  114  173  174
+```
 
-A cache-busting query parameter did nothing. Same generation, same weak etag,
-same 29,940 bytes, `age` climbing straight through it. A unique URL does not
-reach the origin when a shield sits in front of it.
+Two objects, born 29 seconds apart, each ageing sixty seconds a minute, each
+served for three minutes against a declared `max-age` of sixty. A block present
+in one generation and missing from the other looked like inventory appearing
+and disappearing on every read, and any diff between consecutive reads was
+partly a diff between two caches.
 
-None of this was a bug I could fix. What it changed is what I compare my own
-latency against. My chain from seeing a change to acting on it takes under two
-seconds. The copy I see the change in is typically a minute and a half old.
-Optimising the two seconds was the wrong end.
+Then the measurement that mattered. The site also pushes a notification when
+inventory changes. Across 152 of those pushes, a read straight after each one
+returned an object built before the push every time. Median lag 70 seconds,
+worst 176.
+
+A cache-busting query parameter changed nothing: same generation, same weak
+etag, same 29,940 bytes, `age` climbing straight through it. A shield in front
+of the origin serves one copy per window whatever the URL says.
+
+What that changed was where the latency work goes. The chain from noticing a
+change to acting on it takes under two seconds. The copy the change is noticed
+in is typically a minute and a half old. Shaving the two seconds was work on the
+wrong end.
+
+## An empty result is not an answer
+
+A well formed response with an empty list has at least three causes, and they
+look identical from outside:
+
+- the thing really is empty
+- the request was wrong, and the server answered politely about nothing
+- the data arrived and the parser dropped it
+
+Two real cases. An event was on sale while the monitor read it every thirty
+seconds and reported nothing available. The endpoint being called does not
+serve that region, and answers 200 with an empty list for events it has never
+heard of. A different endpoint had the data all along.
+
+In the other, general admission tickets arrived with an empty `places` array
+and the section name on the offer, because standing areas have no seat map. The
+parser skipped entries with no places, so 37% of one venue was invisible, and
+the log line for that venue was identical to the log line for a sold out one.
+
+The check: before concluding anything from an empty read, run the same request
+shape against data you know exists. If that is empty too, the problem is the
+request.
+
+## A count is not a rate until it is grouped
+
+One night's log had 524 failed reads across 56 events in about eleven hours.
+Against the total that is roughly one percent, which reads as background noise.
+
+Grouped by connection instead of by event, 461 of the 524 were seven events on
+one connection, every read timing out, for forty-five minutes straight, while
+five other events on that same connection read fine.
+
+Same numbers. Grouped one way it is a rate you accept. Grouped the other way it
+is an outage you fix. A rate that is really an incident collapses into one
+bucket as soon as you group it by the right dimension, so group by all of them
+before deciding which one you have.
+
+## Compare against the reference
+
+This one is from a fix to an open-source HTTP client: deciding whether the
+first two bytes of a compressed body are a zlib header.
+
+The check had three conditions and a test that generated real headers with the
+standard library's encoder and asserted they were all recognised. Reverting the
+fix turned the test red, which looked like enough. Deleting one of the three
+conditions, so the check accepted more than it should, left it green. The only
+negative case failed a different condition, so nothing held that one.
+
+Adding examples is the obvious repair, and it is how the previous bug of this
+kind happened: two headers worked out by hand for a table were not valid at all.
+
+The standard library already answers this exact question, and there are only
+65,536 two-byte headers. So the test walks every one of them, asks the
+reference, and asserts the check agrees. They agree exactly, 66 accepted by
+both and no disagreement either way, and deleting any of the three conditions
+now fails.
+
+The general form: when your code reimplements a decision something else makes
+correctly and the input space is small enough, enumerate it and compare. And
+check a test in both directions. A test that only ever goes red when the fix is
+reverted has only been shown to catch one kind of mistake.
+
+## A defect you can read and a defect you can reach
+
+Also from someone else's HTTP client, chasing a crash report open for a year.
+
+The cause was easy to see. One function is reached from two places and only one
+of them runs the setup that fills in three fields. Come in through the other
+and the fields are nil, and the code that uses them runs in its own goroutine,
+so the nil dereference takes down the whole process with no chance to recover.
+Two lines reproduce it.
+
+The end to end test, a real server and an ordinary client, did not crash. Every
+ordinary request passes through a third method that runs the setup, so the
+fields are filled in before the second path is ever used. The defect is real,
+but it is only reachable before anything has run that setup, which is why the
+reporter saw it intermittently under load.
+
+"This code is wrong" came from reading. "You can get here with it wrong" only
+came from running it, and that half was the one that explained what the
+reporter actually saw. Writing up the first version would have told a
+maintainer their library crashes on a path where it does not.
 
 ## A verdict the tool could not reach
 
-The tool that measured that cache had two verdicts, `FRESH` and `STALE`.
-`FRESH` was decided from the `last-modified` header. That header came back
-empty on every read, and the tool's own notes said so, two paragraphs below the
-code that needed it.
+The tool that measured the cache above prints one of two verdicts per read,
+`FRESH` or `STALE`. `FRESH` was decided from the `last-modified` header, which
+came back empty on every read. So a tool whose whole output is a verdict had one
+verdict it could never print, and nothing said so.
 
-So a tool whose entire output was a verdict had one verdict it could never
-print, and nothing said so. It reconstructs the object's age from whichever
-header is present now, and says which one it used. When a tool exists to say
-one of two things, make it prove it can say both.
+It now reconstructs the object's age from whichever header is present and says
+which one it used. When a tool exists to say one of two things, make it show it
+can say both.
 
 ## Closing a socket with unread data is a reset
 
-Not from the ticketing project. A test I wrote started a small server, recorded
-what a client sent, wrote a response, and closed. Two runs in six the client
-reported the connection forcibly closed and never saw the response.
+A small test server recorded what a client sent, wrote a response and closed.
+In two runs out of six the client reported the connection forcibly closed and
+never saw the response.
 
-The client had kept talking after its request, a settings acknowledgement in
-this case, and the server closed with those bytes unread. A close with unread
-data in the receive buffer is a reset, not a shutdown, and a reset can take the
-response the client was about to read with it. The server drains until the test
-is done with the client now. Any test server that answers and hangs up needs
-the same.
+The client kept talking after its request, an HTTP/2 settings acknowledgement
+in this case, and the server closed with those bytes unread. A close with
+unread data in the receive buffer is a reset, and a reset can discard the
+response the client was about to read. The server now drains until the test is
+done with the client. Any test server that answers and hangs up needs the same.
 
-## A defect you can read is not always a defect you can reach
+## How these notes are kept
 
-Not from the ticketing project. I was reading someone else's HTTP client,
-chasing a crash report that had been open for a year.
+Every conclusion that turns out wrong goes into a two-column table: what I was
+confident about, and what it turned out to be. It is at 122 rows. In 117 of
+them the cause was in my own code or my own reading of a response, and in five
+the platform genuinely behaved differently than expected.
 
-The cause was easy to see. One function is reached from two places, and only
-one of them runs the setup that fills in three fields. Come in through the other
-door and all three are still nil, and the code that uses them runs in its own
-goroutine, so the nil dereference takes the whole process down with no chance to
-recover. Two lines reproduce it.
+The sections above are the ones that generalise. The table is what produces
+them, because it puts the correction next to the original claim, so a sentence
+written two weeks ago cannot quietly become the thing everything else is
+reasoned from.
 
-I was sure enough to start writing it up as a crash on a common path. Then I
-wrote the end to end test first, out of habit. A server advertising the feature,
-an ordinary client, a wait afterwards to let the goroutine run.
-
-It survived. I made the wait longer. Still alive.
-
-Every ordinary request goes through a third method that does run the setup, so
-by the time the second door is used the fields are already filled in. The defect
-is real and the process really does die, but only when nothing has run the setup
-yet, which is why the reporter saw it intermittently under load rather than on
-every run.
-
-Both halves matter and they are different claims. "This code is wrong" I had
-from reading. "You can get here with it wrong" only came from running it, and it
-was the half that explained the symptom the reporter actually described. Had I
-sent the first version, I would have told a stranger their library crashes on a
-path where it does not.
-
-## A test that passes proves nothing until you have seen it fail
-
-I wrote a test to pin down a safety property. It passed. I moved on.
-
-Months later I deleted the check it was supposed to be guarding, to see what
-would happen, and the test still passed. Its fixture was empty, so the code under
-test returned early every time and never reached the comparison the test was
-about. Every assertion in it was true for the wrong reason.
-
-Now, when a test guards something that matters, I delete the guard and run it. If
-it does not go red, the test is decorative. This takes about two minutes and it
-has caught three tests that were checking nothing.
-
-The same applies to a fix. Reverting the fix and watching the test fail is the
-only evidence that the test and the fix are about the same thing.
-
-## Compare against the reference, not against a table you wrote
-
-The same HTTP client as two sections up, a different bug, and this one is
-about the fix I wrote rather than the bug.
-
-I had to decide whether two bytes at the front of a compressed body are a
-particular format's header. I wrote the check, three conditions, and a test that
-generated real headers with the standard library's encoder and asserted my check
-recognised them all. Then, because of the section above, I mutated: reverted
-the fix, watched the test go red. Good.
-
-It was not good. I had only mutated in one direction. I deleted one of the three
-conditions, making the check accept more than it should, and the suite stayed
-green. My only negative case failed a different condition anyway, so nothing in
-the test was holding that one.
-
-The obvious repair is more examples. That is where the previous bug of this kind
-came from: two headers I worked out by hand for a table turned out not to be
-valid at all.
-
-So instead of examples, the reference. The standard library already decides this
-exact question. There are 65536 possible two byte headers, which is nothing, so
-the test walks all of them, asks the standard library whether it accepts each
-one, and asserts my check agrees. They agree exactly: 66 accepted by both, no
-disagreement in either direction. Deleting any of the three conditions now fails.
-
-The general version: when you are reimplementing a decision something else
-already makes correctly, do not write down examples of the decision. If the
-input space is small enough to enumerate, enumerate it and compare. My table had
-a handful of entries and was blind to a whole direction. A loop over every input
-cannot be.
-
-## A number is not a rate until you have grouped it correctly
-
-One night's log had 524 failed reads across 56 events over roughly eleven hours.
-Against the total number of reads that is about one percent, which looks like
-background noise, and I wrote it down as background noise.
-
-Grouped by connection instead of by event, 461 of those 524 are seven events on
-a single connection, every read timing out, for forty five minutes straight,
-while five other events on that same connection worked fine throughout.
-
-Same 524 numbers. Grouped one way it is a rate you accept. Grouped the other way
-it is an outage you fix. Nothing about the data changed.
-
-The general version: before accepting a number as a background rate, group it by
-every dimension you have. A rate that is really an incident collapses into one
-bucket.
-
-## Check the cheapest thing first
-
-At one point everything went silent. Every read on every event failed. The only
-symptom was a generic token error, repeated once per event per scan, which looks
-exactly like a network problem.
-
-The captcha solving account had 0.009 dollars left on it.
-
-Nine tenths of a cent, about nine more solves, on a system that spends 350 a day.
-There was no degraded mode. No token means no read, on everything, at once.
-
-It took a while because I went looking for a subtle problem first. The check that
-would have found it immediately is one unauthenticated HTTP request that returns
-a number, and nothing in the system was making it. It does now, and the startup
-output prints the balance as days remaining rather than as an amount, because an
-amount invites you to glance at it and a countdown does not.
-
-## What I take from this
-
-None of these are clever. They are all versions of the same thing: the story in
-your head is cheaper to produce than the measurement, so it gets produced first,
-and then it quietly becomes the thing you reason from.
-
-The table works because it puts the correction physically next to the claim. I
-cannot read the confident version without reading what it turned out to be. That
-is the only trick in it.
-
-If you keep one, count the rows before you quote the total.
+If you keep one, count the rows before you quote the total. Mine was wrong
+twice because the number had been incremented instead of counted.
