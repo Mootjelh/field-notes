@@ -39,6 +39,7 @@ tells the cases apart. All the numbers are measured.
 - [A verdict the tool could not reach](#a-verdict-the-tool-could-not-reach)
 - [Closing a socket with unread data is a reset](#closing-a-socket-with-unread-data-is-a-reset)
 - [How these notes are kept](#how-these-notes-are-kept)
+- [Elsewhere](#elsewhere)
 
 ## A block page and an error are opposite problems
 
@@ -157,7 +158,8 @@ before deciding which one you have.
 
 ## Compare against the reference
 
-This one is from a fix to an open-source HTTP client: deciding whether the
+This one is from [a fix to an open-source HTTP
+client](https://github.com/bogdanfinn/fhttp/pull/27): deciding whether the
 first two bytes of a compressed body are a zlib header.
 
 The check had three conditions and a test that generated real headers with the
@@ -182,7 +184,8 @@ reverted has only been shown to catch one kind of mistake.
 
 ## A defect you can read and a defect you can reach
 
-Also from someone else's HTTP client, chasing a crash report open for a year.
+Also from [someone else's HTTP client](https://github.com/imroc/req/pull/538),
+chasing a crash report open for a year.
 
 The cause was easy to see. One function is reached from two places and only one
 of them runs the setup that fills in three fields. Come in through the other
@@ -227,7 +230,7 @@ done with the client. Any test server that answers and hangs up needs the same.
 ## How these notes are kept
 
 Every conclusion that turns out wrong goes into a two-column table: what I was
-confident about, and what it turned out to be. It is at 122 rows. In 117 of
+confident about, and what it turned out to be. It is at 174 rows. In 169 of
 them the cause was in my own code or my own reading of a response, and in five
 the platform genuinely behaved differently than expected.
 
@@ -238,3 +241,17 @@ reasoned from.
 
 If you keep one, count the rows before you quote the total. Mine was wrong
 twice because the number had been incremented instead of counted.
+
+## Elsewhere
+
+Small Go packages that came out of the same work:
+
+- [hardiff](https://github.com/Mootjelh/hardiff) compares two HTTP Archive
+  captures and shows what changed.
+- [identlint](https://github.com/Mootjelh/identlint) checks that a request's
+  headers agree with the browser they claim to be.
+- [proxypool](https://github.com/Mootjelh/proxypool) is a rotating proxy pool
+  with cooldowns.
+- [flatread](https://github.com/Mootjelh/flatread) reads FlatBuffers buffers
+  when you do not have the schema, and
+  [flatschema](https://github.com/Mootjelh/flatschema) infers one from samples.
