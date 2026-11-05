@@ -26,6 +26,10 @@ tells the cases apart. All the numbers are measured.
 8. A tool with two verdicts has to prove it can print both.
 9. A test server that closes with unread data sends a reset, which can take the
    response with it.
+10. Before a check can fail someone else's request, count what it flags on
+    traffic you know is real.
+11. A mutation that stops the build is not a test that passed. When you count
+    failures, check that something ran.
 
 ## Contents
 
@@ -38,6 +42,8 @@ tells the cases apart. All the numbers are measured.
 - [A defect you can read and a defect you can reach](#a-defect-you-can-read-and-a-defect-you-can-reach)
 - [A verdict the tool could not reach](#a-verdict-the-tool-could-not-reach)
 - [Closing a socket with unread data is a reset](#closing-a-socket-with-unread-data-is-a-reset)
+- [A check that holds on one capture](#a-check-that-holds-on-one-capture)
+- [Zero failures because nothing ran](#zero-failures-because-nothing-ran)
 - [How these notes are kept](#how-these-notes-are-kept)
 - [Elsewhere](#elsewhere)
 
@@ -227,10 +233,34 @@ unread data in the receive buffer is a reset, and a reset can discard the
 response the client was about to read. The server now drains until the test is
 done with the client. Any test server that answers and hangs up needs the same.
 
+## A check that holds on one capture
+
+A header checker of mine notes when a request carries the client hints a
+browser only sends after the site asks for them with `Accept-CH`. The obvious
+next step was to make it stricter on a capture: if the hints are there and no
+earlier response from that origin asked for them, the client made them up.
+
+Before building it I counted. Across 44 captures from real browsers, 9 requests
+carried those hints, and none of the 9 followed an `Accept-CH` from the same
+origin in that capture. The browser remembers the opt-in from an earlier visit.
+The stricter check would have flagged every real browser it saw, and on the one
+capture I had in mind it would have looked right.
+
+## Zero failures because nothing ran
+
+To check that each new rule had a test behind it, I deleted the rules one at a
+time and counted failing tests with a grep. One deletion reported zero, which
+read as a test passing for the wrong reason.
+
+It was the harness. That deletion left a variable unused, the package stopped
+compiling, and a build failure prints no failing test, so the count was zero.
+Written so it compiled, the same deletion failed the test it should. A count of
+failures means something only next to proof that the tests ran.
+
 ## How these notes are kept
 
 Every conclusion that turns out wrong goes into a two-column table: what I was
-confident about, and what it turned out to be. It is at 174 rows. In 169 of
+confident about, and what it turned out to be. It is at 499 rows. In 494 of
 them the cause was in my own code or my own reading of a response, and in five
 the platform genuinely behaved differently than expected.
 
